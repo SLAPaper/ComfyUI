@@ -18,8 +18,14 @@ try:
     else:
         cuda_version = tuple(map(int, str(torch.version.cuda).split('.')))
         if cuda_version < (13,):
-            ck.registry.disable("cuda")
-            logging.warning("WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.")
+            # cu<13 lacks the block-scale FP4 cuBLASLt APIs but not the int4
+            # MMA or fp8 paths. Kitchen's per-op FunctionConstraints already
+            # gate scaled_mm_nvfp4 behind HAS_CUBLASLT, so we keep the CUDA
+            # backend enabled for svdquant_w4a4 / fp8 / mxfp8 / rope.
+            logging.warning(
+                "cuda_version=%s < 13: NVFP4 cuBLAS path unavailable; "
+                "other kitchen CUDA ops (svdquant W4A4, fp8, mxfp8, rope) remain active.",
+                ".".join(map(str, cuda_version)))
 
     ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
@@ -35,6 +41,9 @@ except ImportError as e:
         pass
 
     class _CKNvfp4Layout:
+        pass
+
+    class _CKSVDQuantW4A4Layout:
         pass
 
     def register_layout_class(name, cls):
@@ -54,6 +63,16 @@ if _CK_AVAILABLE:
 if not _CK_MXFP8_AVAILABLE:
     class _CKMxfp8Layout:
         pass
+
+_CK_SVDQUANT_W4A4_AVAILABLE = False
+if _CK_AVAILABLE:
+    try:
+        from comfy_kitchen.tensor import TensorCoreSVDQuantW4A4Layout as _CKSVDQuantW4A4Layout
+        _CK_SVDQUANT_W4A4_AVAILABLE = True
+    except ImportError:
+        logging.info("comfy_kitchen does not expose SVDQuant W4A4 layout; int4 SVDQuant checkpoints will not be supported.")
+        class _CKSVDQuantW4A4Layout:
+            pass
 
 import comfy.float
 
@@ -162,6 +181,13 @@ class TensorCoreFP8E5M2Layout(_TensorCoreFP8LayoutBase):
     FP8_DTYPE = torch.float8_e5m2
 
 
+# SVDQuant W4A4 — pre-quantized offline (no runtime quantize), pass through the
+# kitchen-registered layout class unchanged. Comfy-side extension reserved in
+# case per-layer input scales or other Comfy-specific metadata are added later.
+class TensorCoreSVDQuantW4A4Layout(_CKSVDQuantW4A4Layout):
+    pass
+
+
 # Backward compatibility alias - default to E4M3
 TensorCoreFP8Layout = TensorCoreFP8E4M3Layout
 
@@ -176,6 +202,8 @@ register_layout_class("TensorCoreFP8E5M2Layout", TensorCoreFP8E5M2Layout)
 register_layout_class("TensorCoreNVFP4Layout", TensorCoreNVFP4Layout)
 if _CK_MXFP8_AVAILABLE:
     register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
+if _CK_SVDQUANT_W4A4_AVAILABLE:
+    register_layout_class("TensorCoreSVDQuantW4A4Layout", TensorCoreSVDQuantW4A4Layout)
 
 QUANT_ALGOS = {
     "float8_e4m3fn": {
@@ -204,6 +232,14 @@ if _CK_MXFP8_AVAILABLE:
         "group_size": 32,
     }
 
+if _CK_SVDQUANT_W4A4_AVAILABLE:
+    QUANT_ALGOS["svdquant_w4a4"] = {
+        "storage_t": torch.int8,
+        "parameters": {"weight_scale", "proj_down", "proj_up", "smooth_factor"},
+        "comfy_tensor_layout": "TensorCoreSVDQuantW4A4Layout",
+        "group_size": 64,
+    }
+
 
 # ==============================================================================
 # Re-exports for backward compatibility
@@ -216,6 +252,7 @@ __all__ = [
     "TensorCoreFP8E4M3Layout",
     "TensorCoreFP8E5M2Layout",
     "TensorCoreNVFP4Layout",
+    "TensorCoreSVDQuantW4A4Layout",
     "QUANT_ALGOS",
     "register_layout_op",
 ]

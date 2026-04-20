@@ -997,6 +997,35 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             orig_dtype=MixedPrecisionOps._compute_dtype,
                             orig_shape=(self.out_features, self.in_features),
                         )
+                    elif self.quant_format == "svdquant_w4a4":
+                        # SVDQuant W4A4: per-group weight scales + low-rank correction
+                        # (proj_down, proj_up) + activation smoothing (smooth_factor)
+                        wscales = self._load_scale_param(state_dict, prefix, "weight_scale", device, manually_loaded_keys)
+                        proj_down = self._load_scale_param(state_dict, prefix, "proj_down", device, manually_loaded_keys)
+                        proj_up = self._load_scale_param(state_dict, prefix, "proj_up", device, manually_loaded_keys)
+                        smooth_factor = self._load_scale_param(state_dict, prefix, "smooth_factor", device, manually_loaded_keys)
+                        act_unsigned = bool(layer_conf.get("act_unsigned", False))
+
+                        # Early Qwen-Image conversion artifacts did not persist the
+                        # fused GELU -> fc2 unsigned-activation flag. Those layers
+                        # are the second linear in the feed-forward block.
+                        if not act_unsigned and (
+                            layer_name.endswith(".img_mlp.net.2") or layer_name.endswith(".txt_mlp.net.2")
+                        ):
+                            act_unsigned = True
+
+                        if any(t is None for t in (wscales, proj_down, proj_up, smooth_factor)):
+                            raise ValueError(f"Missing SVDQuant W4A4 parameters for layer {layer_name}")
+
+                        params = layout_cls.Params(
+                            scale=wscales,
+                            orig_dtype=MixedPrecisionOps._compute_dtype,
+                            orig_shape=(self.out_features, self.in_features),
+                            proj_down=proj_down,
+                            proj_up=proj_up,
+                            smooth_factor=smooth_factor,
+                            act_unsigned=act_unsigned,
+                        )
                     else:
                         raise ValueError(f"Unsupported quantization format: {self.quant_format}")
 
@@ -1046,6 +1075,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     quant_conf = {"format": self.quant_format}
                     if self._full_precision_mm_config:
                         quant_conf["full_precision_matrix_mult"] = True
+                    if bool(getattr(getattr(self.weight, "_params", None), "act_unsigned", False)):
+                        quant_conf["act_unsigned"] = True
                     sd["{}comfy_quant".format(prefix)] = torch.tensor(list(json.dumps(quant_conf).encode('utf-8')), dtype=torch.uint8)
 
                     input_scale = getattr(self, 'input_scale', None)
@@ -1103,18 +1134,24 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
                 # Inference path (unchanged)
                 if _use_quantized:
+                    # Some layouts (e.g. SVDQuant W4A4) do activation quantization
+                    # inside their fused kernel and cannot pre-quantize a float
+                    # tensor up-front. Skip the input wrapping for those.
+                    layout_cls = get_layout_class(self.layout_type)
+                    layout_quantizes_input = getattr(layout_cls, "QUANTIZES_INPUT", True)
 
-                    # Reshape 3D tensors to 2D for quantization (needed for NVFP4 and others)
-                    input_reshaped = input.reshape(-1, input_shape[2]) if input.ndim == 3 else input
+                    if layout_quantizes_input:
+                        # Reshape 3D tensors to 2D for quantization (needed for NVFP4 and others)
+                        input_reshaped = input.reshape(-1, input_shape[2]) if input.ndim == 3 else input
 
-                    # Fall back to non-quantized for non-2D tensors
-                    if input_reshaped.ndim == 2:
-                        reshaped_3d = input.ndim == 3
-                        # dtype is now implicit in the layout class
-                        scale = getattr(self, 'input_scale', None)
-                        if scale is not None:
-                            scale = comfy.model_management.cast_to_device(scale, input.device, None)
-                        input = QuantizedTensor.from_float(input_reshaped, self.layout_type, scale=scale)
+                        # Fall back to non-quantized for non-2D tensors
+                        if input_reshaped.ndim == 2:
+                            reshaped_3d = input.ndim == 3
+                            # dtype is now implicit in the layout class
+                            scale = getattr(self, 'input_scale', None)
+                            if scale is not None:
+                                scale = comfy.model_management.cast_to_device(scale, input.device, None)
+                            input = QuantizedTensor.from_float(input_reshaped, self.layout_type, scale=scale)
 
                 output = self.forward_comfy_cast_weights(input, compute_dtype, want_requant=isinstance(input, QuantizedTensor))
 
