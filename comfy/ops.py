@@ -1026,6 +1026,21 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             smooth_factor=smooth_factor,
                             act_unsigned=act_unsigned,
                         )
+                    elif self.quant_format == "awq_w4a16":
+                        # AWQ W4A16: int4 weight, fp16/bf16 activation. Used by
+                        # Qwen-Image-Edit modulation linears so they stay packed
+                        # instead of being dequantized to bf16 at load time.
+                        wscales = self._load_scale_param(state_dict, prefix, "weight_scale", device, manually_loaded_keys)
+                        wzeros = self._load_scale_param(state_dict, prefix, "weight_zero", device, manually_loaded_keys)
+                        if wscales is None or wzeros is None:
+                            raise ValueError(f"Missing AWQ W4A16 parameters for layer {layer_name}")
+                        params = layout_cls.Params(
+                            scale=wscales,
+                            zeros=wzeros,
+                            group_size=int(layer_conf.get("group_size", qconfig.get("group_size", 64))),
+                            orig_dtype=MixedPrecisionOps._compute_dtype,
+                            orig_shape=(self.out_features, self.in_features),
+                        )
                     else:
                         raise ValueError(f"Unsupported quantization format: {self.quant_format}")
 
