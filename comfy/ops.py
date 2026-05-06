@@ -1018,6 +1018,15 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             smooth_factor=smooth_factor,
                             act_unsigned=act_unsigned,
                         )
+
+                        # Tile-packed checkpoints store bias as (N/128, 128).
+                        # CUDA kernel accepts both, but the eager fallback
+                        # broadcasts against (M, N) and nn.Linear registers
+                        # bias as 1D (N,) — flatten so both paths work.
+                        bias_key = f"{prefix}bias"
+                        bias_value = state_dict.get(bias_key)
+                        if bias_value is not None and bias_value.dim() > 1:
+                            state_dict[bias_key] = bias_value.reshape(-1).contiguous()
                     elif self.quant_format == "awq_w4a16":
                         # AWQ W4A16: int4 weight, fp16/bf16 activation. Used by
                         # Qwen-Image-Edit modulation linears so they stay packed
