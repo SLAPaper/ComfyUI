@@ -1006,14 +1006,6 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         smooth_factor = self._load_scale_param(state_dict, prefix, "smooth_factor", device, manually_loaded_keys)
                         act_unsigned = bool(layer_conf.get("act_unsigned", False))
 
-                        # Early Qwen-Image conversion artifacts did not persist the
-                        # fused GELU -> fc2 unsigned-activation flag. Those layers
-                        # are the second linear in the feed-forward block.
-                        if not act_unsigned and (
-                            layer_name.endswith(".img_mlp.net.2") or layer_name.endswith(".txt_mlp.net.2")
-                        ):
-                            act_unsigned = True
-
                         if any(t is None for t in (wscales, proj_down, proj_up, smooth_factor)):
                             raise ValueError(f"Missing SVDQuant W4A4 parameters for layer {layer_name}")
 
