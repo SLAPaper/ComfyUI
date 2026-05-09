@@ -1,6 +1,8 @@
 import torch
 import logging
 
+from comfy.cli_args import args
+
 try:
     import comfy_kitchen as ck
     from comfy_kitchen.tensor import (
@@ -27,7 +29,15 @@ try:
                 "other kitchen CUDA ops (svdquant W4A4, fp8, mxfp8, rope) remain active.",
                 ".".join(map(str, cuda_version)))
 
-    ck.registry.disable("triton")
+    if args.enable_triton_backend:
+        try:
+            import triton
+            logging.info("Found triton %s. Enabling comfy-kitchen triton backend.", triton.__version__)
+        except ImportError as e:
+            logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
+            ck.registry.disable("triton")
+    else:
+        ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
         logging.info(f"Found comfy_kitchen backend {k}: {v}")
 except ImportError as e:
