@@ -951,9 +951,17 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     if self.quant_format is None:
                         raise ValueError(f"Unknown quantization format for layer {layer_name}")
 
+                    if self.quant_format not in QUANT_ALGOS:
+                        raise ValueError(
+                            f"Quantization format '{self.quant_format}' for layer {layer_name} "
+                            f"is not available in this build (supported: {sorted(QUANT_ALGOS.keys())}). "
+                            "Update comfy_kitchen to enable it."
+                        )
                     qconfig = QUANT_ALGOS[self.quant_format]
                     self.layout_type = qconfig["comfy_tensor_layout"]
-                    layout_cls = get_layout_class(self.layout_type)
+                    self._layout_cls = get_layout_class(self.layout_type)
+                    self._layout_quantizes_input = getattr(self._layout_cls, "QUANTIZES_INPUT", True)
+                    layout_cls = self._layout_cls
 
                     # Load format-specific parameters
                     if self.quant_format in ["float8_e4m3fn", "float8_e5m2"]:
@@ -1006,14 +1014,6 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         smooth_factor = self._load_scale_param(state_dict, prefix, "smooth_factor", device, manually_loaded_keys)
                         act_unsigned = bool(layer_conf.get("act_unsigned", False))
 
-                        # Early Qwen-Image conversion artifacts did not persist the
-                        # fused GELU -> fc2 unsigned-activation flag. Those layers
-                        # are the second linear in the feed-forward block.
-                        if not act_unsigned and (
-                            layer_name.endswith(".img_mlp.net.2") or layer_name.endswith(".txt_mlp.net.2")
-                        ):
-                            act_unsigned = True
-
                         if any(t is None for t in (wscales, proj_down, proj_up, smooth_factor)):
                             raise ValueError(f"Missing SVDQuant W4A4 parameters for layer {layer_name}")
 
@@ -1027,10 +1027,9 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             act_unsigned=act_unsigned,
                         )
                     elif self.quant_format == "awq_w4a16":
-                        # AWQ W4A16: int4 weight, fp16/bf16 activation. Used for
-                        # the modulation linears (img_mod.1 / txt_mod.1) so they
-                        # stay int4 in checkpoint + VRAM rather than getting
-                        # dequantized to bf16 at conversion time (~10 GB saving).
+                        # AWQ W4A16: int4 weight, fp16/bf16 activation. Used by
+                        # Qwen-Image-Edit modulation linears so they stay packed
+                        # instead of being dequantized to bf16 at load time.
                         wscales = self._load_scale_param(state_dict, prefix, "weight_scale", device, manually_loaded_keys)
                         wzeros = self._load_scale_param(state_dict, prefix, "weight_zero", device, manually_loaded_keys)
                         if wscales is None or wzeros is None:
@@ -1150,13 +1149,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
                 # Inference path (unchanged)
                 if _use_quantized:
-                    # Some layouts (e.g. SVDQuant W4A4) do activation quantization
-                    # inside their fused kernel and cannot pre-quantize a float
-                    # tensor up-front. Skip the input wrapping for those.
-                    layout_cls = get_layout_class(self.layout_type)
-                    layout_quantizes_input = getattr(layout_cls, "QUANTIZES_INPUT", True)
-
-                    if layout_quantizes_input:
+                    if getattr(self, "_layout_quantizes_input", True):
                         # Reshape 3D tensors to 2D for quantization (needed for NVFP4 and others)
                         input_reshaped = input.reshape(-1, input_shape[2]) if input.ndim == 3 else input
 

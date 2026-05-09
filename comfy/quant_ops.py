@@ -18,8 +18,14 @@ try:
     else:
         cuda_version = tuple(map(int, str(torch.version.cuda).split('.')))
         if cuda_version < (13,):
-            ck.registry.disable("cuda")
-            logging.warning("WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.")
+            # cu<13 lacks the block-scale FP4 cuBLASLt APIs but not the int4
+            # MMA or fp8 paths. Kitchen's per-op FunctionConstraints already
+            # gate scaled_mm_nvfp4 behind HAS_CUBLASLT, so we keep the CUDA
+            # backend enabled for svdquant_w4a4 / fp8 / mxfp8 / rope.
+            logging.warning(
+                "cuda_version=%s < 13: NVFP4 cuBLAS path unavailable; "
+                "other kitchen CUDA ops (svdquant W4A4, fp8, mxfp8, rope) remain active.",
+                ".".join(map(str, cuda_version)))
 
     ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
@@ -68,8 +74,10 @@ if _CK_AVAILABLE:
         _CK_SVDQUANT_W4A4_AVAILABLE = True
     except ImportError:
         logging.info("comfy_kitchen does not expose SVDQuant W4A4 layout; int4 SVDQuant checkpoints will not be supported.")
-        class _CKSVDQuantW4A4Layout:
-            pass
+
+if not _CK_SVDQUANT_W4A4_AVAILABLE:
+    class _CKSVDQuantW4A4Layout:
+        pass
 
 _CK_AWQ_W4A16_AVAILABLE = False
 if _CK_AVAILABLE:
@@ -77,9 +85,11 @@ if _CK_AVAILABLE:
         from comfy_kitchen.tensor import TensorCoreAWQW4A16Layout as _CKAWQW4A16Layout
         _CK_AWQ_W4A16_AVAILABLE = True
     except ImportError:
-        logging.info("comfy_kitchen does not expose AWQ W4A16 layout; int4 AWQ modulation checkpoints will fall back to bf16-dequantized layers.")
-        class _CKAWQW4A16Layout:
-            pass
+        logging.info("comfy_kitchen does not expose AWQ W4A16 layout; int4 AWQ modulation checkpoints will not be supported.")
+
+if not _CK_AWQ_W4A16_AVAILABLE:
+    class _CKAWQW4A16Layout:
+        pass
 
 import comfy.float
 
@@ -195,10 +205,8 @@ class TensorCoreSVDQuantW4A4Layout(_CKSVDQuantW4A4Layout):
     pass
 
 
-# AWQ W4A16 — pre-quantized offline (no runtime quantize) via the kitchen
-# eager `gemv_awq_w4a16` op. Used for modulation linears (img_mod.1 /
-# txt_mod.1) on Qwen-Image-Edit and similar topologies where keeping the
-# weight at int4 saves ~10 GB of VRAM vs the bf16-dequantized fallback.
+# AWQ W4A16 — pre-quantized offline modulation linears. Kitchen owns the
+# tensor subclass dispatch and gemv implementation; ComfyUI only loads params.
 class TensorCoreAWQW4A16Layout(_CKAWQW4A16Layout):
     pass
 
@@ -273,12 +281,12 @@ if _CK_AWQ_W4A16_AVAILABLE:
 __all__ = [
     "QuantizedTensor",
     "QuantizedLayout",
-    "TensorCoreAWQW4A16Layout",
     "TensorCoreFP8Layout",
     "TensorCoreFP8E4M3Layout",
     "TensorCoreFP8E5M2Layout",
     "TensorCoreNVFP4Layout",
     "TensorCoreSVDQuantW4A4Layout",
+    "TensorCoreAWQW4A16Layout",
     "QUANT_ALGOS",
     "register_layout_op",
 ]
