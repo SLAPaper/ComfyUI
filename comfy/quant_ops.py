@@ -1,6 +1,8 @@
 import torch
 import logging
 
+from comfy.cli_args import args
+
 try:
     import comfy_kitchen as ck
     from comfy_kitchen.tensor import (
@@ -27,7 +29,15 @@ try:
                 "other kitchen CUDA ops (svdquant W4A4, fp8, mxfp8, rope) remain active.",
                 ".".join(map(str, cuda_version)))
 
-    ck.registry.disable("triton")
+    if args.enable_triton_backend:
+        try:
+            import triton
+            logging.info("Found triton %s. Enabling comfy-kitchen triton backend.", triton.__version__)
+        except ImportError as e:
+            logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
+            ck.registry.disable("triton")
+    else:
+        ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
         logging.info(f"Found comfy_kitchen backend {k}: {v}")
 except ImportError as e:
@@ -74,8 +84,10 @@ if _CK_AVAILABLE:
         _CK_SVDQUANT_W4A4_AVAILABLE = True
     except ImportError:
         logging.info("comfy_kitchen does not expose SVDQuant W4A4 layout; int4 SVDQuant checkpoints will not be supported.")
-        class _CKSVDQuantW4A4Layout:
-            pass
+
+if not _CK_SVDQUANT_W4A4_AVAILABLE:
+    class _CKSVDQuantW4A4Layout:
+        pass
 
 _CK_AWQ_W4A16_AVAILABLE = False
 if _CK_AVAILABLE:
@@ -84,8 +96,10 @@ if _CK_AVAILABLE:
         _CK_AWQ_W4A16_AVAILABLE = True
     except ImportError:
         logging.info("comfy_kitchen does not expose AWQ W4A16 layout; int4 AWQ modulation checkpoints will not be supported.")
-        class _CKAWQW4A16Layout:
-            pass
+
+if not _CK_AWQ_W4A16_AVAILABLE:
+    class _CKAWQW4A16Layout:
+        pass
 
 import comfy.float
 
